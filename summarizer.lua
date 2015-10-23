@@ -2,6 +2,7 @@ local cmd = torch.CmdLine()
 cmd:option('-gpuidx', 1, 'Index of GPU on which job should be executed.')
 cmd:option('-max_seq_length', 30, 'Maximum input sentence length.')
 cmd:option('-batch_size', 32, 'Training batch size.')
+cmd:option('-model_path', 'models', 'Trained autoencoder path.')
 cmd:option(
   '-train', paths.concat('hdata', 'train_seg'),
   'Training data folder path.'
@@ -125,93 +126,11 @@ local state_train, state_valid, state_test
 local model = {}
 local paramx_enc, paramdx_enc, paramx_dec, paramdx_dec
 
-local function lstm(x, prev_c, prev_h)
-  -- Calculate all four gates in one go
-  local i2h = nn.Linear(params.rnn_size, 4*params.rnn_size)(x)
-  local h2h = nn.Linear(params.rnn_size, 4*params.rnn_size)(prev_h)
-  local gates = nn.CAddTable()({i2h, h2h})
-
-  -- Reshape to (batch_size, n_gates, hid_size)
-  -- Then slize the n_gates dimension, i.e dimension 2
-  local reshaped_gates =  nn.Reshape(4,params.rnn_size)(gates)
-  local sliced_gates = nn.SplitTable(2)(reshaped_gates)
-
-  -- Use select gate to fetch each gate and apply nonlinearity
-  local in_gate          = nn.Sigmoid()(nn.SelectTable(1)(sliced_gates))
-  local in_transform     = nn.Tanh()(nn.SelectTable(2)(sliced_gates))
-  local forget_gate      = nn.Sigmoid()(nn.SelectTable(3)(sliced_gates))
-  local out_gate         = nn.Sigmoid()(nn.SelectTable(4)(sliced_gates))
-
-  local next_c           = nn.CAddTable()({
-      nn.CMulTable()({forget_gate, prev_c}),
-      nn.CMulTable()({in_gate,     in_transform})
-  })
-  local next_h           = nn.CMulTable()({out_gate, nn.Tanh()(next_c)})
-
-  return next_c, next_h
-end
-
-local function create_network()
-  local x                = nn.Identity()()
-  local y                = nn.Identity()()
-  local prev_s_enc       = nn.Identity()()
-  local i                = {[0] = LookupTable(params.vocab_size,
-                                                    params.rnn_size)(x)}
-  local next_s_enc       = {}
-  local split_enc        = {prev_s_enc:split(2 * params.layers)}
-  for layer_idx = 1, params.layers do
-    local prev_c         = split_enc[2 * layer_idx - 1]
-    local prev_h         = split_enc[2 * layer_idx]
-    local dropped        = nn.Dropout(params.dropout)(i[layer_idx - 1])
-    local next_c, next_h = lstm(dropped, prev_c, prev_h)
-    table.insert(next_s_enc, next_c)
-    table.insert(next_s_enc, next_h)
-    i[layer_idx] = next_h
-  end
-
-  local encoder = nn.gModule(
-    {x, prev_s_enc},
-    {i[params.layers], nn.Identity()(next_s_enc)}
-  )
-
-  local prev_s_dec      = nn.Identity()()
-  local j_0             = nn.Identity()()
-  local j               = {[0] = j_0}
-  local next_s_dec      = {}
-  local split_dec       = {prev_s_dec:split(2 * params.layers)}
-  for layer_idx = 1, params.layers do
-    local prev_c         = split_dec[2 * layer_idx - 1]
-    local prev_h         = split_dec[2 * layer_idx]
-    local dropped        = nn.Dropout(params.dropout)(j[layer_idx - 1])
-    local next_c, next_h = lstm(dropped, prev_c, prev_h)
-    table.insert(next_s_dec, next_c)
-    table.insert(next_s_dec, next_h)
-    j[layer_idx] = next_h
-  end
-
-  local h2y              = nn.Linear(params.rnn_size, params.vocab_size)
-  local dropped          = nn.Dropout(params.dropout)(j[params.layers])
-  local pred             = nn.LogSoftMax()(h2y(dropped))
-  local mask             = torch.ones(params.vocab_size)
-  mask[NIL] = 0
-  local err              = nn.ClassNLLCriterion(mask)({pred, y})
-
-  local decoder = nn.gModule(
-    {j_0, y, prev_s_dec},
-    {err, nn.Identity()(next_s_dec), pred}
-  )
-
-  encoder:getParameters():uniform(-params.init_weight, params.init_weight)
-  decoder:getParameters():uniform(-params.init_weight, params.init_weight)
-  encoder = transfer_data(encoder)
-  decoder = transfer_data(decoder)
-
-  return {encoder, decoder}
-end
-
 local function setup()
-  print("Creating a RNN LSTM network.")
-  local encoder, decoder = unpack(create_network())
+  print("Loading RNN LSTM networks...")
+  local encoder = torch.load(path.concat(opt.model_path, 'enc.net'))
+  local decoder = torch.load(path.concat(opt.model_path, 'dec.net'))
+
   paramx_enc, paramdx_enc = encoder:getParameters()
   paramx_dec, paramdx_dec = decoder:getParameters()
 

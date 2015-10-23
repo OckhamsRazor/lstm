@@ -1,3 +1,21 @@
+local cmd = torch.CmdLine()
+cmd:option('-gpuidx', 1, 'Index of GPU on which job should be executed.')
+cmd:option('-max_seq_length', 30, 'Maximum input sentence length.')
+cmd:option('-batch_size', 32, 'Training batch size.')
+cmd:option(
+  '-train', paths.concat('hdata', 'train_seg'),
+  'Training data folder path.'
+)
+cmd:option(
+  '-valid', paths.concat('hdata', "valid_permute_segment.txt"),
+  'Validation data path.'
+)
+cmd:option(
+  '-test', paths.concat('hdata', "test_permute_segment.txt"),
+  'Testing data path.'
+)
+local opt = cmd:parse(arg)
+
 local ok,cunn = pcall(require, 'fbcunn')
 if not ok then
     ok,cunn = pcall(require,'cunn')
@@ -38,8 +56,8 @@ local params = {batch_size=20,
 --]]
 -- Trains 1h and gives test 115 perplexity.
 -- [[
-local params = {batch_size=32,
-                max_seq_length=tonumber(arg[2]),
+local params = {batch_size=tonumber(opt.batch_size),
+                max_seq_length=tonumber(opt.max_seq_length),
                 layers=2,
                 decay=2,
                 rnn_size=1000,
@@ -54,6 +72,11 @@ local params = {batch_size=32,
 
 local stringx = require('pl.stringx')
 local data_path = "./hdata/"
+local EOS = params.vocab_size-1
+local NIL = params.vocab_size
+
+local SPACE = 32
+local NEW_LINE = 10
 
 local function load_data_into_sents(fname)
   local sents = {}
@@ -66,11 +89,11 @@ local function load_data_into_sents(fname)
     if #sent ~= 0 then
       sent = stringx.split(sent)
       if #sent < params.max_seq_length then
-        table.insert(sent, params.vocab_size-1)
+        table.insert(sent, EOS)
         table.insert(sents, sent)
       end
       for wid = #sent+1, params.max_seq_length do
-        sents[#sents][wid] = params.vocab_size
+        sents[#sents][wid] = NIL
       end
     end
   until file:hasError()
@@ -80,23 +103,19 @@ end
 
 local state_test
 local model = {}
-local paramx_enc, paramdx_enc, paramx_dec, paramdx_dec
 local embeddings = {}
 local preds = {}
+local ys = {}
+-- local emb_out = torch.DiskFile("embs", "w"):noAutoSpacing()
 
 local function setup()
   print("Loading RNN LSTM networks...")
-  local encoder = torch.load('./models/12.enc')
-  local decoder = torch.load('./models/12.dec')
-
-  paramx_enc, paramdx_enc = encoder:getParameters()
-  paramx_dec, paramdx_dec = decoder:getParameters()
+  local encoder = torch.load('./models.1017/5.enc')
+  local decoder = torch.load('./models.1017/5.dec')
 
   model.s_enc = {}
-  model.ds_enc = {}
   model.start_s_enc = {}
   model.s_dec = {}
-  model.ds_dec = {}
   model.start_s_dec = {}
   model.embeddings = {}
   model.preds = {}
@@ -113,17 +132,13 @@ local function setup()
   end
   for d = 1, 2 * params.layers do
     model.start_s_enc[d] = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
-    model.ds_enc[d] = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
     model.start_s_dec[d] = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
-    model.ds_dec[d] = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
   end
 
   model.encoder = encoder
   model.decoder = decoder
   model.rnns_enc = g_cloneManyTimes(encoder, params.max_seq_length)
   model.rnns_dec = g_cloneManyTimes(decoder, params.max_seq_length)
-  model.norm_dw_enc = 0
-  model.norm_dw_dec = 0
   model.err = transfer_data(torch.zeros(params.max_seq_length))
 end
 
@@ -139,16 +154,8 @@ local function reset_state(state)
   end
 end
 
-local function reset_ds()
-  for d = 1, #model.ds_enc do
-    model.ds_enc[d]:zero()
-    model.ds_dec[d]:zero()
-  end
-end
-
 local function _fp(state)
   g_replace_table(model.s_enc[0], model.start_s_enc)
-  g_replace_table(model.s_dec[0], model.start_s_dec)
 
   if state.pos + params.batch_size > #state.data then
     reset_state(state)
@@ -162,21 +169,52 @@ local function _fp(state)
   end
   state.data_batch = transfer_data(data_batch)
 
+  local eos_pos = transfer_data(
+    torch.ones(params.batch_size):mul(params.max_seq_length)
+  )
   for i = 1, params.max_seq_length do
     local x = state.data_batch[i]
-    local y = state.data_batch[i]
     local s_enc = model.s_enc[i - 1]
-    local s_dec = model.s_dec[i - 1]
     model.embeddings[i], model.s_enc[i] = unpack(
       model.rnns_enc[i]:forward({x, s_enc})
     )
+
+    -- if some sentences reach <eos> at i-th word...
+    if eos_pos[x:eq(EOS)]:dim() == 1 then
+      eos_pos[x:eq(EOS)] = i
+    end
+  end
+
+  for l = 1, 2*params.layers do
+    for b = 1, params.batch_size do
+      model.s_dec[0][l][b]:copy(model.s_enc[eos_pos[b]][l][b])
+    end
+  end
+
+  -- print(model.s_dec[0][1][1])
+  -- for l = 1, 2*params.layers do
+  --   for b = 1, params.batch_size do
+  --     for r = 1, params.rnn_size do
+  --       emb_out:writeDouble(model.s_dec[0][l][b][r])
+  --       emb_out:writeChar(SPACE)
+  --     end
+  --     emb_out:writeChar(NEW_LINE)
+  --   end
+  -- end
+  -- emb_out:writeChar(NEW_LINE)
+
+  for i = 1, params.max_seq_length do
+    local y = state.data_batch[i]
+    local s_dec = model.s_dec[i - 1]
+    local emb = s_dec[2*params.layers]
     model.err[i], model.s_dec[i], model.preds[i] = unpack(
-      model.rnns_dec[i]:forward({model.embeddings[i], y, s_dec})
+      model.rnns_dec[i]:forward({emb, y, s_dec})
     )
   end
-  g_replace_table(model.start_s_enc, model.s_enc[params.max_seq_length])
-  g_replace_table(model.start_s_dec, model.s_dec[params.max_seq_length])
 
+  table.insert(ys, state.data_batch)
+
+  g_replace_table(model.start_s_enc, model.s_enc[params.max_seq_length])
   return model.err:mean()
 end
 
@@ -214,10 +252,10 @@ local function run_test()
 end
 
 local function main()
-  g_init_gpu(arg)
+  g_init_gpu(opt.gpuidx)
 
   local test_sents = load_data_into_sents(
-    data_path .. "test_permute_segment.txt"
+    data_path .. "test_permute_segment_short.txt"
   )
   state_test = {data=test_sents}
   setup()
@@ -225,16 +263,21 @@ local function main()
   run_test()
   print("Testing is over.")
 
-  local fout = torch.DiskFile("preds", "w"):noAutoSpacing()
+  local pred_out = torch.DiskFile("preds", "w"):noAutoSpacing()
+  local ref_out = torch.DiskFile("ref", "w"):noAutoSpacing()
   for preds_size = 1, #preds do
     for b = 1, params.batch_size do
       for s = 1, params.max_seq_length do
-        fout:writeInt(preds[preds_size][b][s])
-        fout:writeChar(32)
+        pred_out:writeInt(preds[preds_size][b][s])
+        pred_out:writeChar(32)
+        ref_out:writeInt(ys[preds_size+1][s][b])
+        ref_out:writeChar(32)
       end
-      fout:writeChar(10)
+      pred_out:writeChar(10)
+      ref_out:writeChar(10)
     end
-    fout:writeChar(10)
+    pred_out:writeChar(10)
+    ref_out:writeChar(10)
   end
 end
 

@@ -65,15 +65,15 @@ local params = {batch_size=tonumber(opt.batch_size),
                 dropout=0.2,
                 init_weight=0.08,
                 lr=0.1,
-                vocab_size=25002,
+                -- vocab_size=25002,
                 max_epoch=4,
                 max_max_epoch=13,
                 max_grad_norm=5}
 
-
+local word_emb_size = 2*params.layers*32*params.rnn_size
 local stringx = require('pl.stringx')
-local EOS = params.vocab_size-1
-local NIL = params.vocab_size
+-- local EOS = params.vocab_size-1
+-- local NIL = params.vocab_size
 
 local function load_data_into_docs(fname)
   local docs = {}
