@@ -71,7 +71,7 @@ local params = {batch_size=tonumber(opt.batch_size),
                 vocab_size=25002,
                 max_epoch=4,
                 max_max_epoch=13,
-                max_grad_norm=5}
+                max_grad_norm=10}
 
 local word_emb_size = 2*params.layers*params.rnn_size
 local stringx = require('pl.stringx')
@@ -106,6 +106,7 @@ end
 local state_train, state_valid, state_test
 local model = {}
 local paramx_enc, paramdx_enc, paramx_dec, paramdx_dec
+local MSE = nn.MSECriterion():cuda()
 
 local function lstm(x, prev_c, prev_h)
   -- Calculate all four gates in one go
@@ -154,7 +155,7 @@ local function create_network()
 
   local encoder = nn.gModule(
     {x, prev_s_enc},
-    {i[params.layers], nn.Identity()(next_s_enc)}
+    {nn.Identity()(next_s_enc)}
   )
 
   local prev_s_dec      = nn.Identity()()
@@ -179,11 +180,11 @@ local function create_network()
   -- local mask             = torch.ones(params.vocab_size)
   -- mask[NIL] = 0
   -- local err              = nn.ClassNLLCriterion(mask)({pred, y})
-  local err              = nn.MSECriterion()({pred, y})
+  -- local err              = nn.MSECriterion()({pred, y})
 
   local decoder = nn.gModule(
-    {j_0, y, prev_s_dec},
-    {err, nn.Identity()(next_s_dec), pred}
+    {j_0, prev_s_dec},
+    {nn.Identity()(next_s_dec), pred}
   )
 
   encoder:getParameters():uniform(-params.init_weight, params.init_weight)
@@ -220,6 +221,8 @@ local function setup()
   model.s_dec = {}
   model.ds_dec = {}
   model.start_s_dec = {}
+
+  model.preds = {}
 
   for j = 0, params.max_doc_length do
     model.s_enc[j] = {}
@@ -363,9 +366,7 @@ local function _fp(state)
   for i = 1, params.max_doc_length do
     local x = state.data_batch[i]
     local s_enc = model.s_enc[i - 1]
-    _, model.s_enc[i] = unpack(
-      model.rnns_enc[i]:forward({x, s_enc})
-    )
+    model.s_enc[i] = model.rnns_enc[i]:forward({x, s_enc})
 
     -- if some sentences reach <eos> at i-th word...
     -- if eos_pos[x:eq(EOS)]:dim() == 1 then
@@ -384,9 +385,11 @@ local function _fp(state)
     local y = state.data_batch[i]
     local s_dec = model.s_dec[i - 1]
     local emb = s_dec[2*params.layers]
-    model.err[i], model.s_dec[i] = unpack(
-      model.rnns_dec[i]:forward({emb, y, s_dec})
+    model.s_dec[i], model.preds[i] = unpack(
+      model.rnns_dec[i]:forward({emb, s_dec})
     )
+
+    model.err[i] = MSE:forward(model.preds[i], y)
   end
   -- g_replace_table(model.start_s_enc, model.s_enc[params.max_doc_length])
 
@@ -402,15 +405,12 @@ local function _bp(state)
     local y = state.data_batch[i]
     local s_dec = model.s_dec[i - 1]
     local embeddings = s_dec[2*params.layers]
-    local d_pred = transfer_data(
-      torch.zeros(params.batch_size, word_emb_size)
-    )
-    local derr = transfer_data(torch.ones(1))
+    local d_pred = MSE:backward(model.preds[i], y)
 
     local tmp_dec = model.rnns_dec[i]:backward(
-      {embeddings, y, s_dec},
-      {derr, model.ds_dec, d_pred}
-    )[3]
+      {embeddings, s_dec},
+      {model.ds_dec, d_pred}
+    )[2]
 
     g_replace_table(model.ds_dec, tmp_dec)
     cutorch.synchronize()
@@ -421,12 +421,8 @@ local function _bp(state)
   for i = params.max_doc_length, 1, -1 do
     local x = state.data_batch[i]
     local s_enc = model.s_enc[i - 1]
-    local d_embedding = transfer_data(
-      torch.zeros(params.batch_size, params.rnn_size)
-    )
     local tmp_enc = model.rnns_enc[i]:backward(
-      {x, s_enc},
-      {d_embedding, model.ds_enc}
+      {x, s_enc}, model.ds_enc
     )[2]
 
     g_replace_table(model.ds_enc, tmp_enc)
@@ -551,6 +547,8 @@ local function main()
       )
     end
     if step % 33 == 0 then
+      print('gc, err. = ' .. g_f3(torch.exp(errs:mean())))
+
       cutorch.synchronize()
       collectgarbage()
     end
