@@ -65,17 +65,18 @@ local params = {batch_size=tonumber(opt.batch_size),
                 dropout=0.2,
                 init_weight=0.08,
                 lr=0.1,
-                vocab_size=25002,
+                vocab_size=25003,
                 max_epoch=4,
                 max_max_epoch=13,
                 max_grad_norm=5}
 
 
 local stringx = require('pl.stringx')
-local EOS = params.vocab_size-1
+local EOS = params.vocab_size-2
+local EOD = params.vocab_size-1
 local NIL = params.vocab_size
 
-local function load_data_into_docs(fname)
+function load_data_into_docs(fname)
   local docs = {}
   local doc = {}
 
@@ -86,10 +87,12 @@ local function load_data_into_docs(fname)
     sent = string.gsub(sent, '%s*$', '')
     if #sent ~= 0 then
       sent = stringx.split(sent)
-      table.insert(sent, '<eos>')
-      table.insert(doc, sent)
-    else
-      table.insert(doc[#doc], '<eod>')
+      for id, word in ipairs(sent) do
+        table.insert(doc, word)
+      end
+      table.insert(doc, EOS)
+    elseif #doc ~= 0 then
+      table.insert(doc, EOD)
       table.insert(docs, doc)
       doc = {}
     end
