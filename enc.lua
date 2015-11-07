@@ -145,6 +145,7 @@ local function _fp(state)
   if data_batch:size()[1] > params.max_seq_length then
     data_batch = data_batch[{{1,params.max_seq_length}}]
   end
+  data_batch:resize(params.max_seq_length, 1)
   for data_id = 1, params.batch_size-1 do
     local new_data = state.data[state.pos + data_id]
     if new_data == nil then
@@ -155,7 +156,9 @@ local function _fp(state)
     if new_data:size()[1] > params.max_seq_length then
       new_data = new_data[{{1,params.max_seq_length}}]
     end
-    data_batch = torch.cat(data_batch, new_data, 2)
+
+    new_data:resize(params.max_seq_length, 1)
+    data_batch = torch.cat(data_batch, new_data)
   end
   state.data_batch = transfer_data(data_batch)
 
@@ -165,6 +168,8 @@ local function _fp(state)
   for i = 1, params.max_seq_length do
     local x = data_batch[i]
     local s_enc = model.s_enc[i - 1]
+    -- print(data_batch)
+    -- os.exit()
     model.s_enc[i] = model.rnns_enc[i]:forward({x, s_enc})[2]
 
     -- if some sentences reach <eos> at i-th word...

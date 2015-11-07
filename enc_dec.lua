@@ -1,15 +1,7 @@
 local cmd = torch.CmdLine()
 cmd:option('-gpuidx', 1, 'Index of GPU on which job should be executed.')
 cmd:option('-max_seq_length', 30, 'Maximum input sentence length.')
-cmd:option('-batch_size', 32, 'Training batch size.')
-cmd:option(
-  '-train', paths.concat('hdata', 'train_seg'),
-  'Training data folder path.'
-)
-cmd:option(
-  '-valid', paths.concat('hdata', "valid_permute_segment.txt"),
-  'Validation data path.'
-)
+cmd:option('-batch_size', 32, 'Batch size.')
 cmd:option(
   '-test', paths.concat('hdata', "test_permute_segment.txt"),
   'Testing data path.'
